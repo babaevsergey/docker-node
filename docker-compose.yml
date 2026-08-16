@@ -1,0 +1,38 @@
+# База. Те, що однакове й у dev, і в CI, і в проді.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    environment:
+      DATABASE_URL: postgres://app:secret@db:5432/app
+      #             ↑ хост «db» — це ІМʼЯ СЕРВІСУ. DNS усередині мережі compose.
+      #               Ніяких IP і ніякого localhost: localhost у контейнері — це сам контейнер
+    depends_on:
+      db:
+        condition: service_healthy
+        # ↑ ОСЬ ГОЛОВНЕ. Без condition depends_on чекає лише СТАРТУ процесу,
+        #   а не готовності приймати запити. Postgres піднімається 2-3 секунди,
+        #   і застосунок падає на першому ж підключенні
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: app
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      #  ↑ іменований том. Без нього дані живуть у шарі контейнера
+      #    і зникають разом із docker compose down
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U app -d app']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    # портів НЕМАЄ навмисно: база доступна лише всередині мережі compose.
+    # Опублікувати 5432 назовні — типова діра в дев-оточенні
+
+volumes:
+  pgdata:

@@ -1,0 +1,25 @@
+{
+  "name": "l5-docker-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "build:naive": "docker build -f Dockerfile.naive -t docker-node-api:naive .",
+    "build:docker": "docker build -t docker-node-api:prod .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "fastify": "^5.11.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/pg": "^8.21.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
