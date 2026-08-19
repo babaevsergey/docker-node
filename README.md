@@ -1,124 +1,82 @@
-# Dockerized Fastify API
+# mini-nest — IoC container
 
-Невеликий Fastify API на TypeScript із PostgreSQL, упакований у Docker.
+Навчальна реалізація невеликого IoC-контейнера на TypeScript. Контейнер будує
+граф залежностей рекурсивно, підтримує singleton/transient scope, явні токени та
+показує зрозумілий ланцюг циклічної залежності. Сторонні DI-контейнери не
+використовуються.
 
-## Вимоги
-
-- Docker Engine або Docker Desktop
-- Docker Compose v2 (`docker compose`)
-- `curl` для перевірки HTTP endpoints
+Fastify API та Docker-конфігурація з ДЗ №5 залишилися в репозиторії як середовище
+запуску для наступних частин mini-Nest.
 
 ## Запуск
 
-У корені проєкту виконайте:
+Локально (потрібен Node.js 22+):
 
 ```bash
-docker compose up -d
+npm ci
+npm test
 ```
 
-Compose збере API, дочекається готовності PostgreSQL і опублікує API за адресою
-`http://localhost:3000`.
-
-## Endpoints
+У Docker, використовуючи наявний сервіс `api`:
 
 ```bash
+docker compose run --rm api npm test
+```
+
+Запуск Fastify API:
+
+```bash
+docker compose up --build
 curl http://localhost:3000/health
-# {"status":"ok"}
-
-curl http://localhost:3000/users
-# [{"id":1,"name":"Ada"}]
-
-curl http://localhost:3000/db
-# {"time":"...","who":"app"}
 ```
 
-## Production та naive images
+## Як це працює
 
-Збірка production image:
+Коли ввімкнені `experimentalDecorators` та `emitDecoratorMetadata`, TypeScript
+додає до декорованого класу runtime-метадані `design:paramtypes`: масив
+конструкторів, що відповідають типам параметрів конструктора. `@Injectable()`
+позначає клас власними метаданими, а `Container` читає
+`Reflect.getMetadata('design:paramtypes', Target)` і рекурсивно резолвить кожен
+тип. Без `emitDecoratorMetadata` компілятор не генерує цей масив, тому типи
+залежностей у JavaScript відсутні й автоматичний резолв неможливий. Також
+метадані не з'являються на класі без жодного декоратора.
 
-```bash
-docker build -t docker-node-api:prod .
+TypeScript-інтерфейси стираються під час компіляції та в `design:paramtypes`
+стають `Object`. У такому випадку параметр позначається `@Inject(token)`, а
+значення або клас попередньо реєструється під рядковим чи `Symbol`-токеном.
+
+```ts
+const CONFIG = Symbol.for('CONFIG');
+
+interface Config {
+  apiUrl: string;
+}
+
+@Injectable()
+class ApiClient {
+  constructor(@Inject(CONFIG) readonly config: Config) {}
+}
+
+const container = new Container();
+container.registerValue(CONFIG, { apiUrl: 'https://example.test' });
+const client = container.resolve(ApiClient);
 ```
 
-Збірка naive image:
+Singleton є стандартним scope. Для нового екземпляра при кожному резолві:
 
-```bash
-docker build -f Dockerfile.naive -t docker-node-api:naive .
+```ts
+@Injectable({ scope: 'transient' })
+class RequestContext {}
 ```
 
-Перевірка розмірів образів:
+Під час рекурсивного резолву контейнер передає поточний шлях класів. Повторний
+вхід у клас із цього шляху завершується помилкою на кшталт
+`Circular dependency detected: A -> B -> A`.
 
-```bash
-docker images docker-node-api
-```
+## Структура
 
-Фактичні розміри:
-
-- `docker-node-api:prod` — 258 MB
-- `docker-node-api:naive` — 1.21 GB
-
-Production image менший, оскільки multi-stage збірка переносить у slim runtime
-лише скомпільований застосунок і production-залежності, без вихідного коду,
-dev-залежностей та інструментів збірки.
-
-## Перевірка non-root
-
-```bash
-docker run --rm docker-node-api:prod id -u
-# 1000
-```
-
-## Перевірка persistence PostgreSQL
-
-Створіть таблицю та додайте тестовий рядок:
-
-```bash
-docker compose exec db psql -U app -d app -c \
-  "CREATE TABLE IF NOT EXISTS persistence_test (
-    id integer PRIMARY KEY,
-    note text
-  );"
-
-docker compose exec db psql -U app -d app -c \
-  "INSERT INTO persistence_test (id, note)
-  VALUES (1, 'survives compose down')
-  ON CONFLICT (id)
-  DO UPDATE SET note = EXCLUDED.note;"
-```
-
-Видаліть контейнери та створіть їх знову, не видаляючи іменований volume:
-
-```bash
-docker compose down
-docker compose up -d
-```
-
-Переконайтеся, що таблиця та дані збереглися:
-
-```bash
-docker compose exec db psql -U app -d app -c \
-  "SELECT * FROM persistence_test;"
-```
-
-Очікуваний результат:
-
-```text
- id |         note
-----+-----------------------
-  1 | survives compose down
-(1 row)
-```
-
-## Зупинка
-
-Зупинити стек, зберігши дані PostgreSQL:
-
-```bash
-docker compose down
-```
-
-Зупинити стек і видалити volumes разом із даними PostgreSQL:
-
-```bash
-docker compose down -v
-```
+- `src/decorators/injectable.ts` — `@Injectable()` та scope.
+- `src/decorators/inject.ts` — `@Inject(token)` для параметрів конструктора.
+- `src/container.ts` — реєстрація провайдерів і рекурсивний резолв.
+- `src/tokens.ts` — типи та symbol-токени метаданих.
+- `test/container.test.ts` — тести основної поведінки.
