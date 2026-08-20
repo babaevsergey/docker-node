@@ -1,45 +1,36 @@
-import Fastify from 'fastify';
-import pg from 'pg';
-import { hostname } from 'node:os';
+import 'reflect-metadata';
 
-const app = Fastify({ logger: false });
-const pool = process.env.DATABASE_URL
-  ? new pg.Pool({ connectionString: process.env.DATABASE_URL })
-  : null;
+import { Container } from './container.js';
+import { Controller } from './decorators/controller.js';
+import { Get } from './decorators/methods.js';
+import { Dispatcher } from './dispatcher.js';
+import { Router } from './router.js';
 
-app.get('/health', async () => ({ status: 'ok' }));
+@Controller()
+class AppController {
+  @Get('health')
+  health(): { status: string } {
+    return { status: 'ok' };
+  }
 
-app.get('/users', async () => [
-  {
-    id: 1,
-    name: 'Ada',
-  },
-]);
-
-app.get('/', async () => ({
-  service: 'l5-docker',
-  hostname: process.env.HOSTNAME ?? hostname(),
-  user: process.getuid?.() === 0 ? 'root ⚠️' : `uid=${process.getuid?.()}`,
-  node: process.version,
-  db: pool ? 'налаштована' : 'не налаштована',
-}));
-
-app.get('/db', async (req, reply) => {
-  if (!pool) return reply.code(503).send({ error: 'DATABASE_URL не задано' });
-  const { rows } = await pool.query('select now() as time, current_user as who');
-  return rows[0];
-});
-
-for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, async () => {
-    console.log(`\n[${sig}] закриваюсь коректно…`);
-    await app.close();
-    await pool?.end();
-    process.exit(0);
-  });
+  @Get()
+  index(): { service: string } {
+    return { service: 'mini-nest' };
+  }
 }
 
-await app.listen({ port: 3000, host: '0.0.0.0' });
-console.log(
-  `слухаю :3000  ·  hostname=${process.env.HOSTNAME ?? hostname()}  ·  uid=${process.getuid?.()}`,
-);
+const container = new Container();
+const router = new Router([AppController]);
+const server = new Dispatcher(container, router).createServer();
+
+await new Promise<void>((resolve) => {
+  server.listen(3000, '0.0.0.0', resolve);
+});
+
+console.log('mini-nest is listening on http://0.0.0.0:3000');
+
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(signal, () => {
+    server.close(() => process.exit(0));
+  });
+}

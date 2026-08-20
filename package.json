@@ -13,13 +13,12 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "fastify": "^5.11.0",
-    "pg": "^8.13.1",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2",
     "reflect-metadata": "^0.2.2"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
-    "@types/pg": "^8.21.0",
     "prettier": "^3.9.6",
     "tsx": "^4.23.12",
     "typescript": "6.x"
