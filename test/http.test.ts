@@ -57,6 +57,7 @@ class UsersController {
 describe('HTTP decorators and dispatcher', () => {
   const container = new Container();
   const router = new Router([UsersController]);
+  const authorization = { authorization: 'Bearer test-token' };
   let server: Server;
   let baseUrl: string;
 
@@ -84,14 +85,14 @@ describe('HTTP decorators and dispatcher', () => {
   });
 
   test('@Param supplies a path value as a handler argument', async () => {
-    const response = await fetch(`${baseUrl}/users/42`);
+    const response = await fetch(`${baseUrl}/users/42`, { headers: authorization });
 
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { id: '42' });
   });
 
   test('@Query supplies a query value as a separate argument', async () => {
-    const response = await fetch(`${baseUrl}/users?limit=5`);
+    const response = await fetch(`${baseUrl}/users?limit=5`, { headers: authorization });
 
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { limit: '5' });
@@ -100,7 +101,7 @@ describe('HTTP decorators and dispatcher', () => {
   test('invalid DTO returns 400 with all validation details', async () => {
     const response = await fetch(`${baseUrl}/users`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...authorization, 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'not-an-email' }),
     });
     const result = (await response.json()) as {
@@ -115,7 +116,7 @@ describe('HTTP decorators and dispatcher', () => {
   test('valid body reaches the handler as a CreateUserDto instance', async () => {
     const response = await fetch(`${baseUrl}/users`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...authorization, 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'Ada', email: 'ada@example.com' }),
     });
 

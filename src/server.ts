@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 
 import { Container } from './container.js';
+import { UsersController } from './controllers/users.controller.js';
 import { Controller } from './decorators/controller.js';
 import { Get } from './decorators/methods.js';
 import { Dispatcher } from './dispatcher.js';
@@ -20,7 +21,7 @@ class AppController {
 }
 
 const container = new Container();
-const router = new Router([AppController]);
+const router = new Router([AppController, UsersController]);
 const server = new Dispatcher(container, router).createServer();
 
 await new Promise<void>((resolve) => {

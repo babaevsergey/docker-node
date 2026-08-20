@@ -1,16 +1,52 @@
+import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import { Container } from './container.js';
-import type { RouteDefinition, Router } from './router.js';
-import { ValidationException, ValidationPipe } from './pipes/validation.pipe.js';
-import type { Constructor, InjectionToken } from './tokens.js';
+import { requestContext, type RequestContext } from './context/request-context.js';
+import { ForbiddenError, NotFoundError, ValidationError } from './errors/http-errors.js';
+import { ExceptionFilter } from './filters/exception.filter.js';
+import { AuthGuard } from './guards/auth.guard.js';
+import { LoggingInterceptor } from './interceptors/logging.interceptor.js';
+import type {
+  ExecutionContext,
+  Guard,
+  Interceptor,
+  Middleware,
+  Next,
+  PipeTransform,
+} from './lifecycle.js';
+import { ZodValidationPipe } from './pipes/zod-validation.pipe.js';
+import type { Router } from './router.js';
+
+export interface DispatcherOptions {
+  middlewares?: Middleware[];
+  guards?: Guard[];
+  interceptors?: Interceptor[];
+  pipes?: PipeTransform[];
+  exceptionFilter?: ExceptionFilter;
+  requestContext?: RequestContext;
+}
 
 export class Dispatcher {
+  private readonly middlewares: Middleware[];
+  private readonly guards: Guard[];
+  private readonly interceptors: Interceptor[];
+  private readonly pipes: PipeTransform[];
+  private readonly exceptionFilter: ExceptionFilter;
+  private readonly contextStorage: RequestContext;
+
   constructor(
     private readonly container: Container,
     private readonly router: Router,
-    private readonly validationPipe = new ValidationPipe(),
-  ) {}
+    options: DispatcherOptions = {},
+  ) {
+    this.middlewares = options.middlewares ?? [];
+    this.guards = options.guards ?? [new AuthGuard()];
+    this.interceptors = options.interceptors ?? [new LoggingInterceptor()];
+    this.pipes = options.pipes ?? [new ZodValidationPipe()];
+    this.exceptionFilter = options.exceptionFilter ?? new ExceptionFilter();
+    this.contextStorage = options.requestContext ?? requestContext;
+  }
 
   createServer(): Server {
     return createServer((request, response) => {
@@ -19,53 +55,80 @@ export class Dispatcher {
   }
 
   async dispatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    try {
-      const url = new URL(request.url ?? '/', 'http://mini-nest.local');
-      const match = this.router.find(request.method, url.pathname);
+    const requestId = getRequestId(request) ?? randomUUID();
+    response.setHeader('x-request-id', requestId);
 
-      if (!match) {
-        this.sendJson(response, 404, { message: 'Route not found' });
-        return;
+    await this.contextStorage.run(requestId, async () => {
+      try {
+        const url = new URL(request.url ?? '/', 'http://mini-nest.local');
+        const match = this.router.find(request.method, url.pathname);
+
+        if (!match) {
+          throw new NotFoundError(
+            `Route ${request.method ?? 'UNKNOWN'} ${url.pathname} was not found`,
+          );
+        }
+
+        const context: ExecutionContext = {
+          request,
+          response,
+          url,
+          route: match.route,
+          params: match.params,
+          requestId,
+        };
+        const result = await this.runMiddlewares(context, () => this.runRoute(context));
+
+        if (!response.writableEnded) {
+          const statusCode = match.route.method === 'POST' ? 201 : 200;
+          this.sendJson(response, statusCode, result);
+        }
+      } catch (error: unknown) {
+        if (!response.writableEnded) {
+          this.exceptionFilter.catch(error, response);
+        }
       }
-
-      const args = await this.buildArguments(request, url, match.route, match.params);
-      const controller = this.container.resolve(match.route.controller) as Record<string, unknown>;
-      const handler = controller[match.route.handlerName];
-
-      if (typeof handler !== 'function') {
-        throw new Error(`Handler ${match.route.handlerName} is not a method`);
-      }
-
-      const result = await handler.apply(controller, args);
-      const statusCode = match.route.method === 'POST' ? 201 : 200;
-      this.sendJson(response, statusCode, result);
-    } catch (error: unknown) {
-      if (error instanceof ValidationException) {
-        this.sendJson(response, error.statusCode, {
-          message: error.message,
-          errors: error.details,
-        });
-        return;
-      }
-
-      if (error instanceof BadRequestException) {
-        this.sendJson(response, 400, {
-          message: error.message,
-          errors: error.details,
-        });
-        return;
-      }
-
-      this.sendJson(response, 500, { message: 'Internal server error' });
-    }
+    });
   }
 
-  private async buildArguments(
-    request: IncomingMessage,
-    url: URL,
-    route: RouteDefinition,
-    params: Record<string, string>,
-  ): Promise<unknown[]> {
+  private async runRoute(context: ExecutionContext): Promise<unknown> {
+    for (const guard of this.guards) {
+      if (!(await guard.canActivate(context))) {
+        throw new ForbiddenError();
+      }
+    }
+
+    const controller = this.container.resolve(context.route.controller) as Record<string, unknown>;
+    const handler = controller[context.route.handlerName];
+
+    if (typeof handler !== 'function') {
+      throw new Error(`Handler ${context.route.handlerName} is not a method`);
+    }
+
+    return this.runInterceptors(context, async () => {
+      const args = await this.buildArguments(context);
+      return handler.apply(controller, args);
+    });
+  }
+
+  private runMiddlewares(context: ExecutionContext, next: Next): Promise<unknown> {
+    return compose(
+      this.middlewares.map((middleware) => (innerNext) => middleware.use(context, innerNext)),
+      next,
+    );
+  }
+
+  private runInterceptors(context: ExecutionContext, next: Next): Promise<unknown> {
+    return compose(
+      this.interceptors.map(
+        (interceptor) => (innerNext) => interceptor.intercept(context, innerNext),
+      ),
+      next,
+    );
+  }
+
+  private async buildArguments(context: ExecutionContext): Promise<unknown[]> {
+    const { request, url, route, params } = context;
     const bodyParameter = [...route.parameters.values()].some(
       (parameter) => parameter.source === 'body',
     );
@@ -78,20 +141,30 @@ export class Dispatcher {
     const args = Array.from<unknown>({ length: parameterCount });
 
     for (const [index, parameter] of route.parameters) {
+      let value: unknown;
+
       if (parameter.source === 'param') {
-        args[index] = params[parameter.name ?? ''];
-        continue;
+        value = params[parameter.name ?? ''];
+      } else if (parameter.source === 'query') {
+        value = url.searchParams.get(parameter.name ?? '') ?? undefined;
+      } else {
+        value = body;
       }
 
-      if (parameter.source === 'query') {
-        args[index] = url.searchParams.get(parameter.name ?? '') ?? undefined;
-        continue;
+      for (const pipe of this.pipes) {
+        value = await pipe.transform(
+          value,
+          {
+            index,
+            source: parameter.source,
+            name: parameter.name,
+            metatype: route.parameterTypes[index],
+          },
+          context,
+        );
       }
 
-      const metatype = route.parameterTypes[index];
-      args[index] = isDtoConstructor(metatype)
-        ? await this.validationPipe.transform(body, metatype)
-        : body;
+      args[index] = value;
     }
 
     return args;
@@ -109,9 +182,7 @@ export class Dispatcher {
     try {
       return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
     } catch {
-      throw new BadRequestException('Invalid JSON body', [
-        { field: 'body', constraints: ['body must contain valid JSON'] },
-      ]);
+      throw new ValidationError([{ field: 'body', constraints: ['body must contain valid JSON'] }]);
     }
   }
 
@@ -122,22 +193,19 @@ export class Dispatcher {
   }
 }
 
-class BadRequestException extends Error {
-  constructor(
-    message: string,
-    readonly details: { field: string; constraints: string[] }[],
-  ) {
-    super(message);
-  }
+type Around = (next: Next) => Promise<unknown>;
+
+function compose(steps: Around[], finalStep: Next): Promise<unknown> {
+  const dispatch = (index: number): Promise<unknown> => {
+    const step = steps[index];
+    return step ? step(() => dispatch(index + 1)) : finalStep();
+  };
+
+  return dispatch(0);
 }
 
-function isDtoConstructor(token: InjectionToken | undefined): token is Constructor {
-  return (
-    typeof token === 'function' &&
-    token !== Object &&
-    token !== String &&
-    token !== Number &&
-    token !== Boolean &&
-    token !== Array
-  );
+function getRequestId(request: IncomingMessage): string | undefined {
+  const header = request.headers['x-request-id'];
+  const value = Array.isArray(header) ? header[0] : header;
+  return value?.trim() || undefined;
 }
